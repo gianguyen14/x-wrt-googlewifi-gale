@@ -40,5 +40,3 @@ Phân vùng 1 phải là `ChromeOS kernel`, không được có `TYPE="ext4"`.
 - [x] Build X-WRT cho Gale
 - [x] Sửa lỗi reboot vào Recovery
 - [x] LuCI và package quản trị chính
-- [ ] prplMesh / EasyMesh
-- [ ] Tương thích ZTE H196A
