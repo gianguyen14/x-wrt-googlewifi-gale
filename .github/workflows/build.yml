@@ -1,0 +1,30 @@
+name: Build X-WRT Gale
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'scripts/**'
+      - 'configs/**'
+      - 'patches/**'
+      - '.github/workflows/build.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build firmware
+        run: |
+          chmod +x scripts/build.sh
+          JOBS=2 ./scripts/build.sh
+      - name: Collect firmware
+        run: |
+          mkdir -p artifacts
+          cp -av ~/xwrt-gale-build/x-wrt/bin/targets/ipq40xx/chromium/* artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: x-wrt-googlewifi-gale
+          path: artifacts/
+          if-no-files-found: error

@@ -1,0 +1,10 @@
+--- a/feeds/x/base-config-setting/files/disk_ready.preinit
++++ b/feeds/x/base-config-setting/files/disk_ready.preinit
+@@
++	# Google WiFi Gale: partition 1 is the ChromeOS kernel.
++	# Never run the generic X-WRT ext4 auto-partition routine on this board.
++	case "$(board_name)" in
++	google,wifi)
++		return
++		;;
++	esac

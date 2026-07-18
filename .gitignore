@@ -1,0 +1,7 @@
+*.log
+*.bin
+*.img
+*.itb
+*.tar
+*.gz
+.DS_Store
