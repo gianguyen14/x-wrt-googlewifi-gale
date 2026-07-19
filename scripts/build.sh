@@ -8,7 +8,7 @@ SRC="${ROOT}/x-wrt"
 RELEASE_DIR="${ROOT}/release"
 LOG_DIR="${ROOT}/logs"
 JOBS="${JOBS:-2}"
-GALE_VERSION="2.0.3"
+GALE_VERSION="2.0.4"
 PROFILES=(lite standard ultimate)
 
 XWRT_COMMIT="5b7e1e72a7cf2b164fa8f8f87b3ad74d39b3007c"
@@ -662,19 +662,38 @@ build_profile() {
   local profile="$1"
   local out="${SRC}/bin/targets/ipq40xx/chromium"
   local file base
+
   log "Build ${profile}"
   cd "${SRC}"
-  make clean
+
+  # Tạo overlay và .config trước. X-WRT sẽ tự gọi menuconfig nếu một lệnh make
+  # chạy khi .config chưa tồn tại hoặc thiếu CONFIG_HAVE_DOT_CONFIG.
   write_overlay "${profile}"
   write_config "${profile}"
   verify_config
+
+  # Chỉ clean sau khi .config hợp lệ để GitHub Actions không rơi vào mconf.
+  make clean
+
+  # Kiểm tra lại vì mọi bước build từ đây phải chạy hoàn toàn non-interactive.
+  [[ -s .config ]] || {
+    echo "Lỗi: .config bị mất sau make clean" >&2
+    exit 1
+  }
+  grep -qx 'CONFIG_HAVE_DOT_CONFIG=y' .config || {
+    echo "Lỗi: .config thiếu CONFIG_HAVE_DOT_CONFIG=y sau make clean" >&2
+    exit 1
+  }
+
   cp .config "${LOG_DIR}/config-${profile}"
+
   make download -j"${JOBS}"
   make -j"${JOBS}" V=s 2>&1 | tee "${LOG_DIR}/build-${profile}.log"
-  for file in "${out}"/*google_wifi*factory.bin "${out}"/*google_wifi*sysupgrade.bin "${out}"/*.manifest; do
+
+  for file in     "${out}"/*google_wifi*factory.bin     "${out}"/*google_wifi*sysupgrade.bin     "${out}"/*.manifest; do
     [[ -f "${file}" ]] || continue
     base="$(basename "${file}")"
-    cp -av "${file}" "${RELEASE_DIR}/xwrt-gale-v${GALE_VERSION}-${profile}-${base}"
+    cp -av "${file}"       "${RELEASE_DIR}/xwrt-gale-v${GALE_VERSION}-${profile}-${base}"
   done
 }
 
