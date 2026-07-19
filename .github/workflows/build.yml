@@ -4,13 +4,12 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - "scripts/**"
-      - "configs/**"
-      - "patches/**"
-      - ".github/workflows/build.yml"
+      - "scripts/build.sh"
+    tags:
+      - "v*"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: xwrt-gale-${{ github.ref }}
@@ -34,21 +33,37 @@ jobs:
         if: always()
         run: |
           mkdir -p artifacts
-          if [ -d "$HOME/xwrt-gale-build/x-wrt/bin/targets/ipq40xx/chromium" ]; then
-            cp -av "$HOME/xwrt-gale-build/x-wrt/bin/targets/ipq40xx/chromium/." artifacts/
+          OUT="$HOME/xwrt-gale-build/x-wrt/bin/targets/ipq40xx/chromium"
+
+          if [ -d "$OUT" ]; then
+            cp -av "$OUT/." artifacts/
           fi
+
           if [ -f "$HOME/xwrt-gale-build/x-wrt/build-gale.log" ]; then
             cp -av "$HOME/xwrt-gale-build/x-wrt/build-gale.log" artifacts/
           fi
+
           if [ -f "$HOME/xwrt-gale-build/x-wrt/.config" ]; then
             cp -av "$HOME/xwrt-gale-build/x-wrt/.config" artifacts/config.build
           fi
 
-      - name: Upload firmware artifact
+      - name: Upload workflow artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: x-wrt-googlewifi-gale
+          name: x-wrt-googlewifi-gale-${{ github.sha }}
           path: artifacts/
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/*google_wifi*factory.bin
+            artifacts/*google_wifi*sysupgrade.bin
+            artifacts/SHA256SUMS-GALE-XWRT
+            artifacts/*.manifest
