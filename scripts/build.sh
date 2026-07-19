@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+export TERM="${TERM:-xterm-256color}"
+
 ROOT="${HOME}/xwrt-gale-build"
 SRC="${ROOT}/x-wrt"
 RELEASE_DIR="${ROOT}/release"
 LOG_DIR="${ROOT}/logs"
 JOBS="${JOBS:-2}"
-GALE_VERSION="2.0.2"
+GALE_VERSION="2.0.3"
 PROFILES=(lite standard ultimate)
 
 XWRT_COMMIT="5b7e1e72a7cf2b164fa8f8f87b3ad74d39b3007c"
@@ -607,6 +609,7 @@ append_packages() {
 write_config() {
   local profile="$1"
   cat > .config <<EOF
+CONFIG_HAVE_DOT_CONFIG=y
 CONFIG_TARGET_ipq40xx=y
 CONFIG_TARGET_ipq40xx_chromium=y
 CONFIG_TARGET_ipq40xx_chromium_DEVICE_google_wifi=y
