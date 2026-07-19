@@ -4,27 +4,51 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - 'scripts/**'
-      - 'configs/**'
-      - 'patches/**'
-      - '.github/workflows/build.yml'
+      - "scripts/**"
+      - "configs/**"
+      - "patches/**"
+      - ".github/workflows/build.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xwrt-gale-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 360
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Build firmware
         run: |
           chmod +x scripts/build.sh
           JOBS=2 ./scripts/build.sh
-      - name: Collect firmware
+
+      - name: Collect firmware and logs
+        if: always()
         run: |
           mkdir -p artifacts
-          cp -av ~/xwrt-gale-build/x-wrt/bin/targets/ipq40xx/chromium/* artifacts/
-      - uses: actions/upload-artifact@v4
+          if [ -d "$HOME/xwrt-gale-build/x-wrt/bin/targets/ipq40xx/chromium" ]; then
+            cp -av "$HOME/xwrt-gale-build/x-wrt/bin/targets/ipq40xx/chromium/." artifacts/
+          fi
+          if [ -f "$HOME/xwrt-gale-build/x-wrt/build-gale.log" ]; then
+            cp -av "$HOME/xwrt-gale-build/x-wrt/build-gale.log" artifacts/
+          fi
+          if [ -f "$HOME/xwrt-gale-build/x-wrt/.config" ]; then
+            cp -av "$HOME/xwrt-gale-build/x-wrt/.config" artifacts/config.build
+          fi
+
+      - name: Upload firmware artifact
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: x-wrt-googlewifi-gale
           path: artifacts/
-          if-no-files-found: error
+          if-no-files-found: warn
+          retention-days: 14
