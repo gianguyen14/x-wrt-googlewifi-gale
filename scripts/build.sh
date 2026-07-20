@@ -3,12 +3,12 @@ set -Eeuo pipefail
 
 export TERM="${TERM:-xterm-256color}"
 
-ROOT="${HOME}/xwrt-gale-ab-build"
+ROOT="${HOME}/xwrt-gale-build"
 SRC="${ROOT}/x-wrt"
 RELEASE_DIR="${ROOT}/release"
 LOG_DIR="${ROOT}/logs"
 JOBS="${JOBS:-2}"
-GALE_VERSION="3.0.0-ab1"
+GALE_VERSION="3.0.0-ab2"
 AB_KERNEL_MIB="32"
 AB_ROOTFS_MIB="192"
 
@@ -197,6 +197,7 @@ define Device/google_wifi
 \tDEVICE_VENDOR := Google
 \tDEVICE_MODEL := WiFi (Gale) Ultimate A/B
 \tSOC := qcom-ipq4019
+\tDEVICE_DTS := qcom-ipq4019-wifi
 \tKERNEL_SUFFIX := -fit-zImage.itb.vboot
 \tKERNEL = kernel-bin | fit none \$\$(KDIR)/image-\$\$(DEVICE_DTS).dtb | cros-vboot
 \tKERNEL_NAME := zImage
@@ -207,6 +208,23 @@ define Device/google_wifi
 endef
 TARGET_DEVICES += google_wifi
 EOF_CHROMIUM_MK
+
+  # The here-document uses visible \t markers for readability. Convert them
+  # to real Makefile TAB characters; otherwise Device variables such as SOC are
+  # not assignments and DEVICE_DTS degrades to "-wifi".
+  python3 - "${mk}" <<'PY_MAKE_TABS'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+t = p.read_text(encoding="utf-8").replace("\\t", "\t")
+p.write_text(t, encoding="utf-8")
+PY_MAKE_TABS
+
+  if grep -qF '\t' "${mk}"; then
+    die "chromium.mk vẫn còn ký hiệu \\t thay vì TAB thật"
+  fi
+  grep -q $'^\tDEVICE_DTS := qcom-ipq4019-wifi$' "${mk}" || \
+    die "DEVICE_DTS Google WiFi chưa được cố định"
 }
 
 write_upgrade_helper() {
@@ -440,7 +458,12 @@ if '. /lib/upgrade/gale-ab.sh' not in t:
     marker = "RAMFS_COPY_DATA='/etc/fw_env.config /var/lock/fw_printenv.lock'\n"
     if marker not in t:
         raise SystemExit("Không tìm thấy RAMFS_COPY_DATA")
-    t = t.replace(marker, marker + "\n. /lib/upgrade/gale-ab.sh\n", 1)
+    replacement = (
+        "RAMFS_COPY_DATA='/etc/fw_env.config /var/lock/fw_printenv.lock "
+        "/lib/upgrade/gale-ab.sh'\n\n"
+        ". /lib/upgrade/gale-ab.sh\n"
+    )
+    t = t.replace(marker, replacement, 1)
 
 t = t.replace(
     "RAMFS_COPY_BIN='fw_printenv fw_setenv'",
@@ -728,7 +751,8 @@ while [ "$n" -lt 36 ]; do
            ubus call network.interface dump >/dev/null 2>&1 &&
            pidof netifd >/dev/null 2>&1 &&
            pidof rpcd >/dev/null 2>&1 &&
-           mountpoint -q /overlay; then
+           grep -qs ' /overlay ' /proc/mounts &&
+           [ -f /overlay/.gale-ab-shared-overlay ]; then
                 sleep 20
                 gale_ab_attr_set "$index" 15 0 1
                 sync
@@ -985,7 +1009,8 @@ build_ultimate() {
 
   (
     cd "${RELEASE_DIR}"
-    sha256sum *factory.bin *sysupgrade.bin > SHA256SUMS-GALE-AB
+    sha256sum *factory.bin *sysupgrade.bin > SHA256SUMS-GALE-XWRT
+    cp SHA256SUMS-GALE-XWRT SHA256SUMS-GALE-AB
   )
 
   # Publish only renamed A/B artifacts into the workflow target directory.
@@ -1009,4 +1034,6 @@ main() {
   log "sysupgrade.bin chỉ dùng sau khi máy đã có KERN-A/ROOT-A/KERN-B/ROOT-B."
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
