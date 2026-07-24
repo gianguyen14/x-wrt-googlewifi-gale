@@ -1,0 +1,68 @@
+#!/bin/sh
+# =============================================================================
+# First-boot setup: Initialize DATA partition on Google WiFi Gale
+# =============================================================================
+# This script runs once on first boot to:
+# 1. Format the DATA partition (mmcblk0p5) as ext4 if needed
+# 2. Set up persistent data mount
+# 3. Configure overlay persistence across A/B slot switches
+# =============================================================================
+
+DATA_PART="/dev/mmcblk0p5"
+DATA_MOUNT="/data"
+
+# Only run if the data partition exists
+if [ ! -b "$DATA_PART" ]; then
+    logger -t setup-data "Data partition $DATA_PART not found, skipping"
+    exit 0
+fi
+
+# Check if already formatted
+DATA_FSTYPE=$(blkid -o value -s TYPE "$DATA_PART" 2>/dev/null || true)
+
+if [ -z "$DATA_FSTYPE" ]; then
+    logger -t setup-data "Formatting $DATA_PART as ext4..."
+    mkfs.ext4 -F -L "DATA" -m 1 "$DATA_PART"
+    logger -t setup-data "Format complete."
+fi
+
+# Create mount point
+mkdir -p "$DATA_MOUNT"
+
+# Mount data partition
+if ! mountpoint -q "$DATA_MOUNT" 2>/dev/null; then
+    mount "$DATA_PART" "$DATA_MOUNT"
+    logger -t setup-data "Mounted $DATA_PART at $DATA_MOUNT"
+fi
+
+# Create standard directories on data partition
+mkdir -p "$DATA_MOUNT/config-backup"
+mkdir -p "$DATA_MOUNT/packages"
+mkdir -p "$DATA_MOUNT/shared"
+mkdir -p "$DATA_MOUNT/overlay"
+mkdir -p "$DATA_MOUNT/logs"
+
+# Add fstab entry for persistent mount
+if ! grep -q "$DATA_PART" /etc/fstab 2>/dev/null; then
+    cat >> /etc/fstab <<EOF
+
+# A/B persistent data partition
+$DATA_PART	$DATA_MOUNT	ext4	defaults,noatime	0	2
+EOF
+    logger -t setup-data "Added fstab entry for data partition"
+fi
+
+# Create symlinks for shared data across A/B slots
+# This allows configuration and user data to persist across slot switches
+
+# Link shared config items to data partition
+for dir in uhttpd samba openvpn wireguard; do
+    if [ -d "/etc/config" ] && [ ! -L "/etc/config/$dir" ]; then
+        if [ -f "/etc/config/$dir" ]; then
+            cp "/etc/config/$dir" "$DATA_MOUNT/shared/$dir" 2>/dev/null || true
+        fi
+    fi
+done
+
+logger -t setup-data "Data partition setup complete"
+exit 0

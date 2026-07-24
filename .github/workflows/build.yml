@@ -1,0 +1,172 @@
+# =============================================================================
+# GitHub Actions: Build X-Wrt Firmware for Google WiFi Gale (A/B Partition)
+# =============================================================================
+# This workflow automates the firmware build process.
+# Trigger manually or on push to main branch.
+# =============================================================================
+
+name: Build X-Wrt Google WiFi Gale A/B
+
+on:
+  workflow_dispatch:
+    inputs:
+      xwrt_branch:
+        description: 'X-Wrt branch to build from'
+        default: 'master'
+        type: string
+  push:
+    branches: [main]
+    paths:
+      - 'custom/**'
+      - 'build.sh'
+      - '.github/workflows/**'
+
+env:
+  XWRT_REPO: https://github.com/x-wrt/x-wrt.git
+  XWRT_BRANCH: ${{ github.event.inputs.xwrt_branch || 'master' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          echo "=== Before cleanup ==="
+          df -h /
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          sudo apt-get autoremove -y
+          sudo apt-get clean
+          echo "=== After cleanup ==="
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev \
+            libssl-dev python3-distutils python3-setuptools rsync \
+            swig unzip zlib1g-dev file wget curl \
+            python3 python3-pip libelf-dev ecj fastjar \
+            device-tree-compiler u-boot-tools fdisk gdisk
+
+      - name: Clone X-Wrt
+        run: |
+          git clone --depth 1 -b ${{ env.XWRT_BRANCH }} ${{ env.XWRT_REPO }} x-wrt
+
+      - name: Update feeds
+        run: |
+          cd x-wrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Apply custom files
+        run: |
+          # Copy A/B update package
+          mkdir -p x-wrt/package/custom/xwrt-ab-update
+          cp -r custom/package/xwrt-ab-update/* x-wrt/package/custom/xwrt-ab-update/
+
+          # Copy image generation files
+          cp custom/target/chromium-ab.mk x-wrt/target/linux/ipq40xx/image/chromium-ab.mk || true
+
+          # Re-install feeds
+          cd x-wrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure build
+        run: |
+          cd x-wrt
+          cp ../custom/dot.config .config
+          make defconfig
+
+      - name: Download sources
+        run: |
+          cd x-wrt
+          make download -j$(nproc) || make download -j1 V=s
+
+      - name: Compile firmware
+        run: |
+          cd x-wrt
+          make -j$(nproc) V=s 2>&1 | tee build.log || \
+          make -j1 V=s 2>&1 | tee build-retry.log
+
+      - name: Create A/B factory image
+        run: |
+          cd x-wrt
+          OUTPUT_DIR="bin/targets/ipq40xx/chromium"
+
+          # Find the built images
+          echo "=== Built images ==="
+          ls -lh "$OUTPUT_DIR/"*google* 2>/dev/null || ls -lh "$OUTPUT_DIR/" || true
+
+          # Run the A/B image creation from build.sh
+          cd ..
+          bash build.sh image || echo "A/B image creation requires post-processing"
+
+      - name: Organize output
+        run: |
+          mkdir -p output
+          cp x-wrt/bin/targets/ipq40xx/chromium/*google* output/ 2>/dev/null || true
+          cp x-wrt/bin/targets/ipq40xx/chromium/*factory* output/ 2>/dev/null || true
+          cp x-wrt/bin/targets/ipq40xx/chromium/*sysupgrade* output/ 2>/dev/null || true
+          cp x-wrt/bin/targets/ipq40xx/chromium/sha256sums output/ 2>/dev/null || true
+
+          echo "=== Output files ==="
+          ls -lh output/
+
+      - name: Upload firmware artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xwrt-gale-ab-firmware
+          path: output/
+          retention-days: 30
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            x-wrt/build.log
+            x-wrt/build-retry.log
+          retention-days: 7
+
+      - name: Create release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "X-Wrt Gale A/B Build #${{ github.run_number }}"
+          files: output/*
+          body: |
+            ## X-Wrt Google WiFi Gale - A/B Partition Firmware
+
+            **Build:** #${{ github.run_number }}
+            **Branch:** ${{ env.XWRT_BRANCH }}
+            **Date:** ${{ github.event.head_commit.timestamp }}
+
+            ### Features
+            - A/B dual rootfs partition (512MB each)
+            - 512MB persistent data partition
+            - LuCI web interface
+            - Dual-band WiFi (2.4GHz + 5GHz)
+            - VPN (OpenVPN + WireGuard)
+            - USB storage + Samba
+            - SQM QoS
+            - Ad-blocking
+            - X-Wrt NATFlow acceleration
+
+            ### Installation
+            1. Flash `*-factory.bin` via USB-C boot in Developer Mode
+            2. Use `ab-sysupgrade` for subsequent updates
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

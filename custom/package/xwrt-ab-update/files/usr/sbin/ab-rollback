@@ -1,0 +1,77 @@
+#!/bin/bash
+# =============================================================================
+# ab-rollback: Manually rollback to the other A/B slot
+# =============================================================================
+set -euo pipefail
+
+EMMC_DEV="/dev/mmcblk0"
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+log()   { echo -e "${GREEN}[AB-ROLLBACK]${NC} $1"; }
+warn()  { echo -e "${YELLOW}[AB-ROLLBACK]${NC} $1"; }
+error() { echo -e "${RED}[AB-ROLLBACK]${NC} $1"; exit 1; }
+
+detect_active_slot() {
+    local root_dev
+    root_dev=$(mount | grep "on / " | awk '{print $1}')
+    case "$root_dev" in
+        *p2|*ROOT-A*) echo "A" ;;
+        *p4|*ROOT-B*) echo "B" ;;
+        *)
+            if grep -q "root=${EMMC_DEV}p2" /proc/cmdline 2>/dev/null; then
+                echo "A"
+            elif grep -q "root=${EMMC_DEV}p4" /proc/cmdline 2>/dev/null; then
+                echo "B"
+            else
+                echo "A"
+            fi
+            ;;
+    esac
+}
+
+active_slot=$(detect_active_slot)
+
+if [ "$active_slot" = "A" ]; then
+    target_slot="B"
+    target_partnum=3
+    active_partnum=1
+else
+    target_slot="A"
+    target_partnum=1
+    active_partnum=3
+fi
+
+log "Current active slot: $active_slot"
+log "Will rollback to slot: $target_slot"
+
+echo ""
+warn "This will reboot into slot $target_slot."
+echo -n "Continue? [y/N] "
+read -r confirm
+if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+    log "Aborted."
+    exit 0
+fi
+
+# Swap boot priorities
+if command -v cgpt &>/dev/null; then
+    cgpt add -i "$target_partnum" -P 2 -T 0 -S 1 "$EMMC_DEV"
+    cgpt add -i "$active_partnum" -P 1 -T 0 -S 1 "$EMMC_DEV"
+    log "Boot priorities swapped via cgpt."
+elif command -v sgdisk &>/dev/null; then
+    sgdisk --attributes="${target_partnum}:=:0x0100000000000002" "$EMMC_DEV"
+    sgdisk --attributes="${active_partnum}:=:0x0100000000000001" "$EMMC_DEV"
+    log "Boot priorities swapped via sgdisk."
+else
+    error "Neither cgpt nor sgdisk found."
+fi
+
+sync
+
+log "Rollback configured. Rebooting in 3 seconds..."
+sleep 3
+reboot

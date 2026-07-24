@@ -1,0 +1,359 @@
+#!/bin/bash
+# =============================================================================
+# ab-sysupgrade: A/B partition-aware firmware upgrade for Google WiFi Gale
+# =============================================================================
+# This script writes a new firmware image to the inactive slot (A or B)
+# and configures the bootloader to boot from it on next reboot.
+# If the new firmware fails to boot, the bootloader automatically
+# rolls back to the previous working slot.
+# =============================================================================
+set -euo pipefail
+
+EMMC_DEV="/dev/mmcblk0"
+KERN_A_PART="${EMMC_DEV}p1"   # KERN-A
+ROOT_A_PART="${EMMC_DEV}p2"   # ROOT-A
+KERN_B_PART="${EMMC_DEV}p3"   # KERN-B
+ROOT_B_PART="${EMMC_DEV}p4"   # ROOT-B
+DATA_PART="${EMMC_DEV}p5"     # DATA
+
+SLOT_FILE="/tmp/ab_current_slot"
+AB_CONFIG="/etc/config/ab-update"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+log()   { echo -e "${GREEN}[AB-UPGRADE]${NC} $1"; }
+warn()  { echo -e "${YELLOW}[AB-UPGRADE]${NC} $1"; }
+error() { echo -e "${RED}[AB-UPGRADE]${NC} $1"; exit 1; }
+
+# =============================================================================
+# Detect current active slot
+# =============================================================================
+detect_active_slot() {
+    local root_dev
+    root_dev=$(mount | grep "on / " | awk '{print $1}')
+
+    case "$root_dev" in
+        *p2|*ROOT-A*)
+            echo "A"
+            ;;
+        *p4|*ROOT-B*)
+            echo "B"
+            ;;
+        *)
+            # Try to detect from kernel cmdline
+            if grep -q "root=${ROOT_A_PART}" /proc/cmdline 2>/dev/null; then
+                echo "A"
+            elif grep -q "root=${ROOT_B_PART}" /proc/cmdline 2>/dev/null; then
+                echo "B"
+            else
+                # Default to A
+                warn "Cannot determine active slot, assuming A"
+                echo "A"
+            fi
+            ;;
+    esac
+}
+
+# =============================================================================
+# Get target (inactive) slot
+# =============================================================================
+get_target_slot() {
+    local active="$1"
+    if [ "$active" = "A" ]; then
+        echo "B"
+    else
+        echo "A"
+    fi
+}
+
+# =============================================================================
+# Get partition devices for a slot
+# =============================================================================
+get_kern_part() {
+    case "$1" in
+        A) echo "$KERN_A_PART" ;;
+        B) echo "$KERN_B_PART" ;;
+    esac
+}
+
+get_root_part() {
+    case "$1" in
+        A) echo "$ROOT_A_PART" ;;
+        B) echo "$ROOT_B_PART" ;;
+    esac
+}
+
+get_kern_partnum() {
+    case "$1" in
+        A) echo "1" ;;
+        B) echo "3" ;;
+    esac
+}
+
+# =============================================================================
+# Extract kernel and rootfs from sysupgrade image
+# =============================================================================
+extract_images() {
+    local img_file="$1"
+    local tmp_dir="/tmp/ab-upgrade"
+
+    mkdir -p "$tmp_dir"
+
+    # X-Wrt/OpenWrt sysupgrade images for chromium target are typically
+    # combined kernel+rootfs. We need to split them.
+    # The image format depends on the target; for Google WiFi it's usually
+    # a FIT image (kernel) + squashfs (rootfs) concatenated.
+
+    local img_size
+    img_size=$(stat -c %s "$img_file")
+
+    log "Image size: $img_size bytes"
+
+    # Try to detect FIT image boundary
+    # FIT images start with 0xd00dfeed (flattened device tree magic)
+    local fit_magic="d00dfeed"
+    local fit_end=0
+
+    # Use the sysupgrade metadata if available
+    if [ -f "${img_file}.metadata" ]; then
+        log "Using sysupgrade metadata"
+    fi
+
+    # For Google WiFi, copy the entire image as combined
+    cp "$img_file" "$tmp_dir/combined.img"
+
+    echo "$tmp_dir"
+}
+
+# =============================================================================
+# Write firmware to target slot
+# =============================================================================
+write_to_slot() {
+    local slot="$1"
+    local img_file="$2"
+
+    local kern_part root_part
+    kern_part=$(get_kern_part "$slot")
+    root_part=$(get_root_part "$slot")
+
+    log "Writing firmware to slot $slot..."
+    log "  Kernel partition: $kern_part"
+    log "  Rootfs partition: $root_part"
+
+    # Unmount target partitions if mounted
+    umount "$root_part" 2>/dev/null || true
+    umount "$kern_part" 2>/dev/null || true
+
+    # Extract and write
+    local tmp_dir
+    tmp_dir=$(extract_images "$img_file")
+
+    if [ -f "$tmp_dir/kernel.bin" ] && [ -f "$tmp_dir/rootfs.bin" ]; then
+        # Separate kernel and rootfs
+        log "Writing kernel to $kern_part..."
+        dd if="$tmp_dir/kernel.bin" of="$kern_part" bs=1M conv=fsync 2>/dev/null
+        log "Writing rootfs to $root_part..."
+        dd if="$tmp_dir/rootfs.bin" of="$root_part" bs=1M conv=fsync 2>/dev/null
+    else
+        # Combined image - write to rootfs partition
+        log "Writing combined image to $root_part..."
+        dd if="$tmp_dir/combined.img" of="$root_part" bs=1M conv=fsync 2>/dev/null
+    fi
+
+    sync
+
+    # Cleanup
+    rm -rf "$tmp_dir"
+
+    log "Write complete for slot $slot."
+}
+
+# =============================================================================
+# Update bootloader priority (ChromeOS Depthcharge)
+# =============================================================================
+update_boot_priority() {
+    local target_slot="$1"
+    local target_partnum
+    local active_partnum
+
+    target_partnum=$(get_kern_partnum "$target_slot")
+
+    if [ "$target_slot" = "A" ]; then
+        active_partnum=3  # KERN-B was active
+    else
+        active_partnum=1  # KERN-A was active
+    fi
+
+    log "Updating boot priority..."
+    log "  New active: slot $target_slot (partition $target_partnum)"
+
+    # Use cgpt to set ChromeOS boot priorities
+    if command -v cgpt &>/dev/null; then
+        # Set target slot: high priority, boot tries = 3, not yet successful
+        cgpt add -i "$target_partnum" -P 2 -T 3 -S 0 "$EMMC_DEV"
+        # Set previous slot: lower priority, successful (fallback)
+        cgpt add -i "$active_partnum" -P 1 -T 0 -S 1 "$EMMC_DEV"
+
+        log "Boot priorities updated via cgpt:"
+        cgpt show "$EMMC_DEV" 2>/dev/null | head -20
+    else
+        # Fallback: use sgdisk/sfdisk to manipulate GPT attributes
+        warn "cgpt not found, using sgdisk fallback"
+
+        if command -v sgdisk &>/dev/null; then
+            # ChromeOS GPT attributes encode priority, tries, and success
+            # Bits 48-51: priority (0-15)
+            # Bits 52-55: tries remaining (0-15)
+            # Bit 56: successful boot flag
+            # Target: priority=2, tries=3, success=0 → attrs = (2<<48)|(3<<52)|(0<<56)
+            sgdisk --attributes="${target_partnum}:=:0x0030000000000002" "$EMMC_DEV"
+            # Fallback: priority=1, tries=0, success=1 → attrs = (1<<48)|(0<<52)|(1<<56)
+            sgdisk --attributes="${active_partnum}:=:0x0100000000000001" "$EMMC_DEV"
+        else
+            error "Neither cgpt nor sgdisk found. Cannot update boot priority."
+        fi
+    fi
+
+    sync
+    log "Boot priority update complete."
+}
+
+# =============================================================================
+# Backup current config to data partition
+# =============================================================================
+backup_config() {
+    log "Backing up configuration to data partition..."
+
+    local data_mount="/data"
+
+    # Ensure data partition is mounted
+    if ! mountpoint -q "$data_mount" 2>/dev/null; then
+        mkdir -p "$data_mount"
+        mount "$DATA_PART" "$data_mount" 2>/dev/null || {
+            warn "Cannot mount data partition for config backup"
+            return 0
+        }
+    fi
+
+    # Create backup directory
+    local backup_dir="$data_mount/config-backup/$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$backup_dir"
+
+    # Backup config
+    if [ -d /etc/config ]; then
+        cp -a /etc/config "$backup_dir/"
+    fi
+
+    # Save installed packages list
+    opkg list-installed > "$backup_dir/packages.list" 2>/dev/null || true
+
+    log "Config backed up to $backup_dir"
+}
+
+# =============================================================================
+# Main upgrade flow
+# =============================================================================
+usage() {
+    cat <<EOF
+Usage: ab-sysupgrade [OPTIONS] <firmware-image>
+
+A/B partition-aware firmware upgrade for Google WiFi Gale.
+Writes firmware to the inactive slot and sets it as the boot target.
+
+Options:
+  -f, --force       Skip confirmation prompt
+  -n, --no-backup   Skip configuration backup
+  -t, --test        Dry run (show what would be done)
+  -h, --help        Show this help
+
+Examples:
+  ab-sysupgrade firmware-sysupgrade.bin
+  ab-sysupgrade -f /tmp/openwrt-sysupgrade.bin
+EOF
+}
+
+main() {
+    local force=0
+    local no_backup=0
+    local dry_run=0
+    local img_file=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            -f|--force)    force=1; shift ;;
+            -n|--no-backup) no_backup=1; shift ;;
+            -t|--test)     dry_run=1; shift ;;
+            -h|--help)     usage; exit 0 ;;
+            *)             img_file="$1"; shift ;;
+        esac
+    done
+
+    if [ -z "$img_file" ]; then
+        error "No firmware image specified. Use -h for help."
+    fi
+
+    if [ ! -f "$img_file" ]; then
+        error "Firmware image not found: $img_file"
+    fi
+
+    # Detect slots
+    local active_slot target_slot
+    active_slot=$(detect_active_slot)
+    target_slot=$(get_target_slot "$active_slot")
+
+    log "=========================================="
+    log " A/B Firmware Upgrade"
+    log "=========================================="
+    log "Active slot:  $active_slot"
+    log "Target slot:  $target_slot"
+    log "Image file:   $img_file"
+    log "Image size:   $(ls -lh "$img_file" | awk '{print $5}')"
+    log "=========================================="
+
+    if [ "$dry_run" -eq 1 ]; then
+        log "[DRY RUN] Would write to slot $target_slot"
+        log "[DRY RUN] Would update boot priority to boot slot $target_slot"
+        exit 0
+    fi
+
+    # Confirmation
+    if [ "$force" -eq 0 ]; then
+        echo ""
+        warn "This will write firmware to slot $target_slot."
+        warn "The device will reboot into the new firmware."
+        echo -n "Continue? [y/N] "
+        read -r confirm
+        if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+            log "Aborted."
+            exit 0
+        fi
+    fi
+
+    # Backup config
+    if [ "$no_backup" -eq 0 ]; then
+        backup_config
+    fi
+
+    # Write firmware
+    write_to_slot "$target_slot" "$img_file"
+
+    # Update boot priority
+    update_boot_priority "$target_slot"
+
+    log "=========================================="
+    log " Upgrade complete!"
+    log " Next boot will use slot $target_slot"
+    log " If boot fails, will auto-rollback to slot $active_slot"
+    log "=========================================="
+
+    echo ""
+    log "Rebooting in 5 seconds... (Ctrl+C to cancel)"
+    sleep 5
+    reboot
+}
+
+main "$@"

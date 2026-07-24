@@ -1,0 +1,6 @@
+# Ignore build outputs and temporary directories
+output/
+x-wrt/
+*.log
+*.tmp
+ create_ab.sh

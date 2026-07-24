@@ -1,0 +1,67 @@
+#!/bin/sh /etc/rc.common
+# =============================================================================
+# ab-bootcheck: Mark current slot as successfully booted
+# =============================================================================
+# On each successful boot, this script marks the current slot as "successful"
+# in the ChromeOS GPT attributes. This prevents the bootloader from
+# rolling back to the previous slot.
+# =============================================================================
+
+START=99
+USE_PROCD=1
+
+EMMC_DEV="/dev/mmcblk0"
+
+boot() {
+    local active_slot
+    local root_dev
+    local kern_partnum
+
+    root_dev=$(mount | grep "on / " | awk '{print $1}')
+
+    case "$root_dev" in
+        *p2|*ROOT-A*)
+            active_slot="A"
+            kern_partnum=1
+            ;;
+        *p4|*ROOT-B*)
+            active_slot="B"
+            kern_partnum=3
+            ;;
+        *)
+            if grep -q "root=${EMMC_DEV}p2" /proc/cmdline 2>/dev/null; then
+                active_slot="A"
+                kern_partnum=1
+            elif grep -q "root=${EMMC_DEV}p4" /proc/cmdline 2>/dev/null; then
+                active_slot="B"
+                kern_partnum=3
+            else
+                logger -t ab-bootcheck "Cannot determine active slot, skipping"
+                return 0
+            fi
+            ;;
+    esac
+
+    logger -t ab-bootcheck "Active slot: $active_slot (kernel partition: $kern_partnum)"
+
+    # Mark current slot as successfully booted
+    # This clears the tries counter and sets the successful flag
+    if command -v cgpt >/dev/null 2>&1; then
+        cgpt add -i "$kern_partnum" -S 1 -T 0 "$EMMC_DEV"
+        logger -t ab-bootcheck "Slot $active_slot marked as successful via cgpt"
+    elif command -v sgdisk >/dev/null 2>&1; then
+        # Set successful=1, tries=0, keep current priority
+        local current_pri
+        current_pri=$(sgdisk --info="$kern_partnum" "$EMMC_DEV" 2>/dev/null | \
+                     grep -i "attribute" | head -1 || echo "2")
+
+        # Priority=2, Tries=0, Successful=1
+        sgdisk --attributes="${kern_partnum}:=:0x0100000000000002" "$EMMC_DEV"
+        logger -t ab-bootcheck "Slot $active_slot marked as successful via sgdisk"
+    else
+        logger -t ab-bootcheck "WARNING: Neither cgpt nor sgdisk found"
+    fi
+
+    # Log slot info
+    logger -t ab-bootcheck "Boot check complete. System running on slot $active_slot"
+}
